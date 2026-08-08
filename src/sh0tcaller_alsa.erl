@@ -1,20 +1,21 @@
-%%%-------------------------------------------------------------------
-%% @doc ALSA capture: find the sound cards we can record from, pick out
-%% the radio interface, and record from it to a wav file.
-%%
-%% The radio is a USB audio interface, so it is identified by being the
-%% capture-capable card that sits on the USB bus (the built-in HDA codec
-%% is not). Override with `application:set_env(sh0tcaller, radio_card, "CODEC")'
-%% when more than one USB capture device is plugged in.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(sh0tcaller_alsa).
+
+-moduledoc """
+ALSA capture: find the sound cards we can record from, pick out the radio
+interface, and record from it to a wav file.
+
+The radio is a USB audio interface, so it is identified by being the
+capture-capable card that sits on the USB bus (the built-in HDA codec is
+not). Override with `application:set_env(sh0tcaller, radio_card, "CODEC")`
+when more than one USB capture device is plugged in.
+""".
 
 -export([
          list_capture_cards/0,
          find_radio/0,
          radio_device/0,
+         pulse_source/1,
+         capture_radio/2,
          record_radio/2,
          record_radio/3,
          record/3,
@@ -26,6 +27,12 @@
 -define(FORMAT, s16_le).
 -define(SAMPLE_BITS, 16).
 
+%% erlang-alsa reports EBUSY as the atom ebusy. Older builds of the NIF
+%% passed unnamed errnos through as integers, so accept 16 as well rather
+%% than silently losing the fallback against a stale _build.
+-define(EBUSY_ERRNO, 16).
+
+-doc "A sound card, as described by /proc/asound.".
 -type card() :: #{
     index := non_neg_integer(),
     id := string(),
@@ -42,17 +49,23 @@
 %% Cards
 %%====================================================================
 
-%% @doc Every sound card with at least one capture device, lowest index
-%% first. erlang-alsa has no enumeration of its own, so this reads
-%% /proc/asound: a card exposes `pcmNc' per capture device and `usbid'
-%% only when it is a USB device.
+-doc """
+Every sound card with at least one capture device, lowest index first.
+
+erlang-alsa has no enumeration of its own, so this reads /proc/asound: a
+card exposes `pcmNc` per capture device, and `usbid` only when it is a USB
+device.
+""".
 -spec list_capture_cards() -> [card()].
 list_capture_cards() ->
     [Card || Card <- all_cards(), maps:get(capture_devices, Card) =/= []].
 
-%% @doc The radio's card. Prefers the `radio_card' application env (a
-%% card id such as "CODEC", or an integer index) and otherwise picks the
-%% single USB capture card.
+-doc """
+The radio's card.
+
+Prefers the `radio_card` application env (a card id such as `"CODEC"`, or
+an integer index) and otherwise picks the single USB capture card.
+""".
 -spec find_radio() -> {ok, card()} | {error, term()}.
 find_radio() ->
     Cards = list_capture_cards(),
@@ -71,9 +84,12 @@ find_radio() ->
             end
     end.
 
-%% @doc ALSA device string for the radio, e.g. "plughw:1,0". plughw
-%% rather than hw so that rate and channel conversion are available if
-%% the hardware will not take them directly.
+-doc """
+ALSA device string for the radio, e.g. `"plughw:1,0"`.
+
+plughw rather than hw, so that rate and channel conversion are available
+if the hardware will not take them directly.
+""".
 -spec radio_device() -> {ok, string()} | {error, term()}.
 radio_device() ->
     case find_radio() of
@@ -85,27 +101,90 @@ radio_device() ->
 %% Recording
 %%====================================================================
 
-%% @doc Record `DurationMs' of audio from the radio at 8 kHz mono and
-%% write it to `Path' as a 16-bit PCM wav file.
+-doc """
+Record `DurationMs` of audio from the radio at 8 kHz mono and write it to
+`Path` as a 16-bit PCM wav file.
+""".
 -spec record_radio(pos_integer(), file:name_all()) -> ok | {error, term()}.
 record_radio(DurationMs, Path) ->
     record_radio(DurationMs, Path, #{}).
 
-%% @doc As {@link record_radio/2}, with `rate' and `channels' overridable.
+-doc "As `record_radio/2`, with `rate` and `channels` overridable.".
 -spec record_radio(pos_integer(), file:name_all(), map()) -> ok | {error, term()}.
 record_radio(DurationMs, Path, Opts) ->
+    case capture_radio(DurationMs, Opts) of
+        {ok, Audio} -> write_wav(Path, Audio, Opts);
+        {error, _} = Error -> Error
+    end.
+
+-doc """
+Capture from the radio and return the samples.
+
+The raw ALSA device is exclusive: while WSJT-X (or anything else going
+through PipeWire) holds it, opening plughw fails with `EBUSY`. In that
+case this retries through the PulseAudio/PipeWire bridge, which shares, so
+recording alongside a running WSJT-X works.
+""".
+-spec capture_radio(pos_integer(), map()) -> {ok, binary()} | {error, term()}.
+capture_radio(DurationMs, Opts) ->
     case find_radio() of
         {ok, Card} ->
             case record(device_name(Card), DurationMs, Opts) of
-                {ok, Audio} -> write_wav(Path, Audio, Opts);
-                {error, _} = Error -> Error
+                {error, Reason} = Busy
+                  when Reason =:= ebusy; Reason =:= ?EBUSY_ERRNO ->
+                    capture_shared(Card, DurationMs, Opts, Busy);
+                Result ->
+                    Result
             end;
         {error, _} = Error ->
             Error
     end.
 
-%% @doc Record exactly `DurationMs' worth of interleaved samples from
-%% `Device' and return them as a binary.
+%% PULSE_SOURCE is read by the ALSA pulse plugin when the device is
+%% opened, and the emulator has one environment, so concurrent captures
+%% from different cards would race here.
+capture_shared(Card, DurationMs, Opts, Busy) ->
+    case pulse_source(Card) of
+        {ok, Source} ->
+            os:putenv("PULSE_SOURCE", Source),
+            try record("pulse", DurationMs, Opts)
+            after
+                os:unsetenv("PULSE_SOURCE")
+            end;
+        {error, _} ->
+            Busy
+    end.
+
+-doc """
+The PipeWire/PulseAudio source that corresponds to a card.
+
+PipeWire derives node names from the ALSA card name, so card
+`"USB Audio CODEC"` becomes
+`alsa_input.usb-Burr-Brown_from_TI_USB_Audio_CODEC-00.analog-stereo`.
+""".
+-spec pulse_source(card()) -> {ok, string()} | {error, term()}.
+pulse_source(#{name := Name}) ->
+    Fragment = lists:flatten(string:replace(Name, " ", "_", all)),
+    case [S || S <- pulse_sources(), string:find(S, Fragment) =/= nomatch] of
+        [Source] -> {ok, Source};
+        [] -> {error, {no_pulse_source_for, Name}};
+        Many -> {error, {ambiguous_pulse_sources, Many}}
+    end.
+
+pulse_sources() ->
+    case sh0tcaller_cmd:run("pactl", ["list", "short", "sources"]) of
+        {ok, 0, Output} ->
+            [Name || Line <- string:split(Output, "\n", all),
+                     [_Id, Name | _] <- [string:lexemes(Line, "\t ")],
+                     lists:prefix("alsa_input.", Name)];
+        _ ->
+            []
+    end.
+
+-doc """
+Record exactly `DurationMs` worth of interleaved samples from `Device` and
+return them as a binary.
+""".
 -spec record(string(), pos_integer(), map()) -> {ok, binary()} | {error, term()}.
 record(Device, DurationMs, Opts) ->
     Rate = maps:get(rate, Opts, ?RATE),
@@ -151,9 +230,12 @@ read_exactly(PCM, Remaining, Acc) ->
 %% Wav
 %%====================================================================
 
-%% @doc Write 16-bit PCM samples as a wav file. The header must describe
-%% the rate and channel count the samples were captured at, or the file
-%% plays back at the wrong speed.
+-doc """
+Write 16-bit PCM samples as a wav file.
+
+The header must describe the rate and channel count the samples were
+captured at, or the file plays back at the wrong speed.
+""".
 -spec write_wav(file:name_all(), binary(), map()) -> ok | {error, term()}.
 write_wav(Path, Audio, Opts) ->
     Rate = maps:get(rate, Opts, ?RATE),
