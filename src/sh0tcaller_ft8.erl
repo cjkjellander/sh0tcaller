@@ -17,12 +17,20 @@ reports from the filename.
          capture_and_decode/1,
          monitor_cycles/1,
          monitor_cycles/2,
-         cycle_filename/1
+         cycle_filename/1,
+         wav_dir/0
         ]).
 
 -define(CYCLE_MS, 15000).
 -define(RATE, 12000).
 -define(CHANNELS, 1).
+
+%% How late we are still willing to join a cycle already in progress.
+%% A capture ends exactly on the next boundary, so without this every
+%% other cycle is dropped while the device is reopened. Kept well under
+%% the 0.5 s at which an FT8 transmission starts, so nothing of the
+%% signal is lost.
+-define(LATE_TOLERANCE_MS, 250).
 
 -doc "One decoded transmission, as reported by jt9.".
 -type decode() :: #{
@@ -52,9 +60,9 @@ return the path written.
 capture(Dir) ->
     case filelib:ensure_path(Dir) of
         ok ->
-            Start = wait_for_cycle(),
+            {Start, Duration} = wait_for_cycle(),
             Path = filename:join(Dir, cycle_filename(Start)),
-            case sh0tcaller_alsa:capture_radio(?CYCLE_MS, params()) of
+            case sh0tcaller_alsa:capture_radio(Duration, params()) of
                 {ok, Audio} ->
                     case sh0tcaller_alsa:write_wav(Path, Audio, params()) of
                         ok -> {ok, Path};
@@ -67,12 +75,22 @@ capture(Dir) ->
             {error, {cannot_create, Dir, Reason}}
     end.
 
-%% Sleeps until the next multiple of 15 s and returns that instant.
+%% Returns {CycleStart, DurationMs}. Normally sleeps until the next
+%% multiple of 15 s and records a whole cycle; if a cycle has only just
+%% begun, joins it and records the remainder rather than waiting for the
+%% next one. Trimming instead of overrunning is what keeps the following
+%% capture on the boundary, so the recording never drifts.
 wait_for_cycle() ->
     Now = os:system_time(millisecond),
-    Next = ((Now div ?CYCLE_MS) + 1) * ?CYCLE_MS,
-    timer:sleep(Next - Now),
-    Next.
+    Elapsed = Now rem ?CYCLE_MS,
+    if
+        Elapsed =< ?LATE_TOLERANCE_MS ->
+            {Now - Elapsed, ?CYCLE_MS - Elapsed};
+        true ->
+            Next = Now - Elapsed + ?CYCLE_MS,
+            timer:sleep(Next - Now),
+            {Next, ?CYCLE_MS}
+    end.
 
 -doc """
 WSJT-X names recordings after the UTC cycle start, and jt9 parses that name
@@ -210,6 +228,11 @@ data_dir() ->
 temp_dir() ->
     env(temp_dir, wav_dir()).
 
+-doc """
+Where cycle recordings are written. Defaults to `$HOME/sh0tcaller-wav`,
+overridable with the `wav_dir` application env.
+""".
+-spec wav_dir() -> file:filename().
 wav_dir() ->
     env(wav_dir, filename:join(home(), "sh0tcaller-wav")).
 
