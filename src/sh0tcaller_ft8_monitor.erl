@@ -1,7 +1,8 @@
 -module(sh0tcaller_ft8_monitor).
 
 -moduledoc """
-Continuously capture FT8 cycles and print decodes to stdout.
+Continuously capture FT8 cycles, print decodes to stdout and pass them to
+any subscriber.
 
 Capturing blocks for a whole 15 second cycle and decoding takes seconds
 more, so neither runs in the server process: a linked capturer loops over
@@ -13,7 +14,7 @@ that crashes takes nothing with it.
 
 -behaviour(gen_server).
 
--export([start_link/1, stop/0]).
+-export([start_link/1, stop/0, subscribe/1]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 
 -define(SERVER, ?MODULE).
@@ -28,6 +29,14 @@ start_link(Dir) ->
 stop() ->
     gen_server:stop(?SERVER).
 
+-doc """
+Receive every decode as `{sh0tcaller_decodes, Path, Decodes}` until the
+subscriber exits. Printing to stdout continues regardless.
+""".
+-spec subscribe(pid()) -> ok.
+subscribe(Pid) ->
+    gen_server:call(?SERVER, {subscribe, Pid}).
+
 %%====================================================================
 %% gen_server
 %%====================================================================
@@ -39,9 +48,16 @@ init(Dir) ->
     Capturer = spawn_link(fun() -> capture_loop(Server, Dir) end),
     io:format("~nMonitoring FT8, recordings in ~ts~n", [Dir]),
     io:format("   UTC   dB    DT    Hz  message~n"),
-    {ok, #{dir => Dir, capturer => Capturer, decoders => #{}}}.
+    {ok, #{dir => Dir,
+           capturer => Capturer,
+           decoders => #{},
+           subscribers => #{}}}.
 
 -doc false.
+handle_call({subscribe, Pid}, _From, #{subscribers := Subscribers} = State) ->
+    Ref = erlang:monitor(process, Pid),
+    {reply, ok, State#{subscribers := Subscribers#{Ref => Pid}}};
+
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported}, State}.
 
@@ -57,8 +73,9 @@ handle_info({captured, Path}, #{decoders := Decoders} = State) ->
     end),
     {noreply, State#{decoders := Decoders#{Ref => Path}}};
 
-handle_info({decoded, Path, {ok, Decodes}}, State) ->
+handle_info({decoded, Path, {ok, Decodes}}, #{subscribers := Subs} = State) ->
     print(Path, Decodes),
+    _ = [Pid ! {sh0tcaller_decodes, Path, Decodes} || Pid <- maps:values(Subs)],
     {noreply, State};
 
 handle_info({decoded, Path, {error, Reason}}, State) ->
@@ -69,13 +86,15 @@ handle_info({capture_failed, Reason}, State) ->
     io:format("capture failed: ~p~n", [Reason]),
     {noreply, State};
 
-handle_info({'DOWN', Ref, process, _Pid, Reason}, #{decoders := Decoders} = State) ->
+%% Both decoders and subscribers are monitored, so work out which this is.
+handle_info({'DOWN', Ref, process, _Pid, Reason},
+            #{decoders := Decoders, subscribers := Subscribers} = State) ->
     case maps:take(Ref, Decoders) of
         {Path, Remaining} ->
             report_decoder_exit(Path, Reason),
             {noreply, State#{decoders := Remaining}};
         error ->
-            {noreply, State}
+            {noreply, State#{subscribers := maps:remove(Ref, Subscribers)}}
     end;
 
 handle_info({'EXIT', Capturer, Reason}, #{capturer := Capturer} = State) ->
