@@ -8,14 +8,17 @@
 
 -module(sh0tcaller_ft8_SUITE).
 
--export([all/0]).
+-export([all/0, end_per_testcase/2]).
 -export([
          cycle_filename_is_utc/1,
          cycle_filename_zero_pads/1,
          parse_extracts_fields/1,
          parse_ignores_non_decode_lines/1,
          parse_keeps_whole_message/1,
-         parse_handles_negative_and_zero_dt/1
+         parse_handles_negative_and_zero_dt/1,
+         decode_invokes_jt9_in_ft8_mode/1,
+         decode_reports_jt9_failure/1,
+         capture_names_the_file_after_the_cycle/1
         ]).
 
 all() ->
@@ -24,7 +27,14 @@ all() ->
      parse_extracts_fields,
      parse_ignores_non_decode_lines,
      parse_keeps_whole_message,
-     parse_handles_negative_and_zero_dt].
+     parse_handles_negative_and_zero_dt,
+     decode_invokes_jt9_in_ft8_mode,
+     decode_reports_jt9_failure,
+     capture_names_the_file_after_the_cycle].
+
+end_per_testcase(_Case, _Config) ->
+    meck:unload(),
+    ok.
 
 %% 2026-08-08T21:54:00Z
 cycle_filename_is_utc(_Config) ->
@@ -77,4 +87,50 @@ parse_handles_negative_and_zero_dt(_Config) ->
     [#{dt := First}, #{dt := Second}] = sh0tcaller_ft8:parse_jt9_output(Output),
     true = is_float(First),
     true = (Second < 0.0),
+    ok.
+
+%% jt9 is an external binary, so it is mecked here: what matters is that
+%% we ask it for FT8 with a 15 second period and hand it the wav.
+decode_invokes_jt9_in_ft8_mode(_Config) ->
+    Output = "215400   3  0.1 1669 ~  CQ UA4POO LO65\n"
+             "<DecodeFinished>   0   1        0\n",
+    meck:new(sh0tcaller_cmd, [passthrough]),
+    meck:expect(sh0tcaller_cmd, run, fun(_Jt9, Args) ->
+        true = lists:member("-8", Args),
+        true = lists:member("-p", Args),
+        true = lists:member("15", Args),
+        "/tmp/cycle.wav" = lists:last(Args),
+        {ok, 0, Output}
+    end),
+    {ok, [#{snr := 3, message := "CQ UA4POO LO65"}]} =
+        sh0tcaller_ft8:decode("/tmp/cycle.wav"),
+    ok.
+
+%% A non-zero exit carries jt9's own output, which is what explains the
+%% failure — swallowing it leaves nothing to debug with.
+decode_reports_jt9_failure(_Config) ->
+    meck:new(sh0tcaller_cmd, [passthrough]),
+    meck:expect(sh0tcaller_cmd, run,
+                fun(_, _) -> {ok, 2, "cannot open wav\n"} end),
+    {error, {jt9_failed, 2, "cannot open wav\n"}} =
+        sh0tcaller_ft8:decode("/tmp/cycle.wav"),
+    ok.
+
+%% The name is what jt9 timestamps decodes from, and the cycle it names
+%% must be a real FT8 boundary. Takes up to a cycle to run, since it
+%% waits for one.
+capture_names_the_file_after_the_cycle(Config) ->
+    meck:new(sh0tcaller_alsa, [passthrough]),
+    meck:expect(sh0tcaller_alsa, capture_radio, fun(DurationMs, _Opts) ->
+        %% 12 kHz mono 16-bit is 24 bytes per ms.
+        {ok, binary:copy(<<0, 0>>, DurationMs * 12)}
+    end),
+    Dir = filename:join(proplists:get_value(priv_dir, Config), "cycles"),
+    {ok, Path} = sh0tcaller_ft8:capture(Dir),
+    Name = filename:basename(Path),
+    {match, [Seconds]} =
+        re:run(Name, "^\\d{6}_\\d{4}(\\d{2})\\.wav$",
+               [{capture, all_but_first, list}]),
+    true = lists:member(Seconds, ["00", "15", "30", "45"]),
+    true = filelib:is_regular(Path),
     ok.

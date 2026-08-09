@@ -40,16 +40,32 @@ app_starts(Config) ->
     ok.
 
 %% A successful open proves alsa_pcm_nif.so loaded — an unloaded NIF
-%% raises undef here rather than returning a handle.
+%% raises undef here rather than returning a handle. Deliberately not
+%% mecked: mocking alsa_pcm would leave this asserting nothing at all.
+%% It skips where there is no sound hardware, such as a CI runner.
 alsa_pcm_nif_loads(_Config) ->
-    {ok, Pcm} = alsa_pcm:open("default", playback),
-    _ = alsa_pcm:close(Pcm),
-    ok.
+    case has_alsa() of
+        false ->
+            {skip, no_alsa_hardware};
+        true ->
+            {ok, Pcm} = alsa_pcm:open("default", playback),
+            _ = alsa_pcm:close(Pcm),
+            ok
+    end.
 
 alsa_ctl_nif_loads(_Config) ->
-    {ok, Ctl} = alsa_ctl:open("hw:0"),
-    _ = alsa_ctl:close(Ctl),
-    ok.
+    case has_alsa() of
+        false ->
+            {skip, no_alsa_hardware};
+        true ->
+            {ok, Ctl} = alsa_ctl:open("hw:0"),
+            _ = alsa_ctl:close(Ctl),
+            ok
+    end.
+
+has_alsa() ->
+    filelib:is_dir("/proc/asound") andalso
+        sh0tcaller_alsa:list_capture_cards() =/= [].
 
 %% Starting the application must not start capturing: that would seize
 %% the radio from whatever else is using it. The monitor supervisor is
@@ -66,20 +82,16 @@ stop_monitor_without_monitor(_Config) ->
     {error, not_running} = sh0tcaller_ft8_sup:stop_monitor(),
     ok.
 
-%% Needs the radio, so it skips rather than fails on a machine without
-%% one. simple_one_for_one children report an id of undefined.
+%% Runs anywhere: starting and stopping is supervisor bookkeeping, and a
+%% capturer that cannot find a radio reports it rather than failing to
+%% start. simple_one_for_one children report an id of undefined.
 monitor_starts_and_stops(Config) ->
-    case sh0tcaller_alsa:find_radio() of
-        {error, Reason} ->
-            {skip, {no_radio, Reason}};
-        {ok, _Card} ->
-            Dir = filename:join(proplists:get_value(priv_dir, Config), "cycles"),
-            {ok, Pid} = sh0tcaller_ft8_sup:start_monitor(Dir),
-            Pid = whereis(sh0tcaller_ft8_monitor),
-            [{undefined, Pid, worker, _}] =
-                supervisor:which_children(sh0tcaller_ft8_sup),
-            ok = sh0tcaller_ft8_sup:stop_monitor(),
-            undefined = whereis(sh0tcaller_ft8_monitor),
-            [] = supervisor:which_children(sh0tcaller_ft8_sup),
-            ok
-    end.
+    Dir = filename:join(proplists:get_value(priv_dir, Config), "cycles"),
+    {ok, Pid} = sh0tcaller_ft8_sup:start_monitor(Dir),
+    Pid = whereis(sh0tcaller_ft8_monitor),
+    [{undefined, Pid, worker, _}] =
+        supervisor:which_children(sh0tcaller_ft8_sup),
+    ok = sh0tcaller_ft8_sup:stop_monitor(),
+    undefined = whereis(sh0tcaller_ft8_monitor),
+    [] = supervisor:which_children(sh0tcaller_ft8_sup),
+    ok.
