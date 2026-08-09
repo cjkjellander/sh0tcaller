@@ -67,7 +67,7 @@ init([]) ->
     Status = wxStaticText:new(Panel, ?wxID_ANY, "idle"),
 
     Panes = wxBoxSizer:new(?wxHORIZONTAL),
-    wxSizer:add(Panes, DecodesBox, [{proportion, 2},
+    wxSizer:add(Panes, DecodesBox, [{proportion, 1},
                                     {flag, ?wxEXPAND bor ?wxALL},
                                     {border, 4}]),
     wxSizer:add(Panes, ReservedBox, [{proportion, 1},
