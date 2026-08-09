@@ -1,6 +1,6 @@
 # -*-Make-*-
 
-.PHONY: clean distclean upgrade compile test dialyzer eunit ct xref repl
+.PHONY: clean distclean upgrade compile test dialyzer eunit ct xref repl gui
 
 default: compile
 
@@ -37,3 +37,8 @@ xref:
 
 repl:
 	rebar3 as test shell
+
+# Boots the application and opens the main window. Closing the window
+# stops the node, so the shell this leaves behind goes away with it.
+gui:
+	rebar3 shell --eval 'sh0tcaller_gui:run().'

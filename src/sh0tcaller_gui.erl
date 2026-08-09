@@ -19,7 +19,7 @@ sh0tcaller_gui:start().
 
 -include_lib("wx/include/wx.hrl").
 
--export([start/0, start_link/0, stop/0]).
+-export([start/0, start/1, start_link/0, run/0, stop/0]).
 -export([init/1, handle_event/2, handle_call/3, handle_cast/2,
          handle_info/2, terminate/2, code_change/3]).
 
@@ -28,12 +28,31 @@ sh0tcaller_gui:start().
 -doc "Open the main window.".
 -spec start() -> wx:wx_object().
 start() ->
-    wx_object:start({local, ?MODULE}, ?MODULE, [], []).
+    start(#{}).
+
+-doc """
+Open the main window.
+
+`halt_on_close` makes closing the window stop the node, which is what
+`make gui` wants. It defaults to false so that opening a window from a
+shell you are working in does not take the shell down with it.
+""".
+-spec start(#{halt_on_close => boolean()}) -> wx:wx_object().
+start(Opts) when is_map(Opts) ->
+    wx_object:start({local, ?MODULE}, ?MODULE, Opts, []).
 
 -doc "Open the main window, linked to the caller.".
 -spec start_link() -> wx:wx_object().
 start_link() ->
-    wx_object:start_link({local, ?MODULE}, ?MODULE, [], []).
+    wx_object:start_link({local, ?MODULE}, ?MODULE, #{}, []).
+
+-doc """
+Open the main window as the reason this node is running: closing it stops
+the node. This is what `make gui` calls.
+""".
+-spec run() -> wx:wx_object().
+run() ->
+    start(#{halt_on_close => true}).
 
 -doc "Close the main window.".
 -spec stop() -> ok.
@@ -45,7 +64,7 @@ stop() ->
 %%====================================================================
 
 -doc false.
-init([]) ->
+init(Opts) ->
     %% wx is not in the application's dependency list: declaring it would
     %% make the whole application unstartable on a build of OTP without
     %% wx, which is exactly what the headless test machines are.
@@ -95,7 +114,8 @@ init([]) ->
               reserved => Reserved,
               button => Button,
               status => Status,
-              monitoring => false}}.
+              monitoring => false,
+              halt_on_close => maps:get(halt_on_close, Opts, false)}}.
 
 -doc false.
 handle_event(#wx{id = ?BUTTON_MONITOR,
@@ -131,11 +151,15 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 -doc false.
-terminate(_Reason, #{frame := Frame}) ->
+terminate(_Reason, #{frame := Frame, halt_on_close := Halt}) ->
     try wxFrame:destroy(Frame)
     catch _:_ -> ok
     end,
     wx:destroy(),
+    case Halt of
+        true -> init:stop();
+        false -> ok
+    end,
     ok.
 
 -doc false.
