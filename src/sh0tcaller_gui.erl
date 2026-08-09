@@ -65,10 +65,9 @@ stop() ->
 
 -doc false.
 init(Opts) ->
-    %% wx is not in the application's dependency list: declaring it would
-    %% make the whole application unstartable on a build of OTP without
-    %% wx, which is exactly what the headless test machines are.
-    {ok, _} = application:ensure_all_started(wx),
+    %% wx is declared in the application's dependency list, so this starts
+    %% it too. Starting the wx application needs no display; only wx:new/0
+    %% below connects to one.
     {ok, _} = application:ensure_all_started(sh0tcaller),
 
     Wx = wx:new(),
