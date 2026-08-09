@@ -1,6 +1,6 @@
 {"1.2.0",
 [{<<"alsa">>,
-  {git,"git@github.com:cjkjellander/erlang-alsa.git",
+  {git,"https://github.com/cjkjellander/erlang-alsa.git",
        {ref,"68acfdf311c7c0fd482880dc60df947461437ff5"}},
   0},
  {<<"reg">>,{pkg,<<"reg">>,<<"0.1.0">>},1}]}.

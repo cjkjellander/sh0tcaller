@@ -265,14 +265,26 @@ matches(_, _) -> false.
 ids(Cards) ->
     [maps:get(id, Card) || Card <- Cards].
 
+%% Where the card information is read from. Overridable with the
+%% `proc_asound_dir' application env so enumeration can be tested against
+%% a fixture rather than the running machine's hardware.
+proc_asound() ->
+    case application:get_env(sh0tcaller, proc_asound_dir) of
+        {ok, Dir} -> Dir;
+        undefined -> "/proc/asound"
+    end.
+
+%% A machine with no sound support at all has no /proc/asound. That is
+%% "no cards", not an error — reporting it as a crash makes every caller
+%% that only wants to know whether a radio is attached blow up instead.
 all_cards() ->
     Descriptions = card_descriptions(),
-    case file:list_dir("/proc/asound") of
+    case file:list_dir(proc_asound()) of
         {ok, Entries} ->
             Indexes = lists:sort([I || E <- Entries, {ok, I} <- [card_index(E)]]),
             [card_info(I, Descriptions) || I <- Indexes];
-        {error, Reason} ->
-            error({proc_asound_unreadable, Reason})
+        {error, _} ->
+            []
     end.
 
 card_index("card" ++ Digits) ->
@@ -283,7 +295,7 @@ card_index(_) ->
     error.
 
 card_info(Index, Descriptions) ->
-    Dir = "/proc/asound/card" ++ integer_to_list(Index),
+    Dir = filename:join(proc_asound(), "card" ++ integer_to_list(Index)),
     {Driver, Name, LongName} = maps:get(Index, Descriptions, {"", "", ""}),
     #{index => Index,
       id => read_line(filename:join(Dir, "id")),
@@ -321,7 +333,7 @@ pcm_capture_index(_) ->
 %%   " 1 [CODEC          ]: USB-Audio - USB Audio CODEC"
 %%   "                      Burr-Brown from TI USB Audio CODEC at usb-..."
 card_descriptions() ->
-    case file:read_file("/proc/asound/cards") of
+    case file:read_file(filename:join(proc_asound(), "cards")) of
         {ok, Contents} ->
             Lines = string:split(binary_to_list(Contents), "\n", all),
             card_descriptions(Lines, #{});

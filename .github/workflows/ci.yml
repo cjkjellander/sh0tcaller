@@ -1,0 +1,197 @@
+name: Automatic testing
+on: [push]
+concurrency:
+  group: ${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+env:
+  OTP_VERSION: "29.0.5"
+  REBAR3_VERSION: "3.27.0"
+
+jobs:
+  versioner:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      releaseTag: ${{ steps.semver.outputs.nextStrict }}
+      commitTag: ${{ steps.git.outputs.commitTag }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        with:
+          fetch-depth: 0 # Need all to see past tags for semver
+
+      - name: Calculate Semantic Version
+        id: semver
+        # this decides if we will tag a release
+        if: github.ref_name == github.event.repository.default_branch && !startsWith(github.event.head_commit.message, 'no-release')
+        uses: ietf-tools/semver-action@c90370b2958652d71c06a3484129a4d423a6d8a8 # v1
+        with:
+          token: ${{ github.token }}
+          branch: master
+          patchAll: true
+          noVersionBumpBehavior: patch
+
+      - name: Calculate Git Version
+        id: git
+        run: |
+          GIT_BRANCH="${GITHUB_REF##*/}"
+          GIT_COMMIT="${GITHUB_SHA:0:7}"
+          echo "commitTag=${GIT_BRANCH}-${GIT_COMMIT}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        if: ${{ steps.semver.outputs.nextStrict != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${{ steps.semver.outputs.nextStrict }}" --generate-notes
+
+  compile-deps:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      # The alsa dependency builds NIFs and a port program against libasound.
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch dependencies from cache
+        uses: actions/cache@v4
+        id: cache
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: deps-v1-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.REBAR3_VERSION }}-${{ hashFiles('rebar.*') }}
+      - name: Compile deps
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: rebar3 as test compile --deps_only
+
+  compile:
+    needs: [compile-deps]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch dependencies from cache
+        uses: actions/cache@v4
+        id: cached-deps
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: deps-v1-${{ runner.os }}-${{ env.OTP_VERSION }}-${{ env.REBAR3_VERSION }}-${{ hashFiles('rebar.*') }}
+      - name: Fetch workspace from cache
+        uses: actions/cache@v4
+        id: cached-workspace
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: workspace-${{ github.run_id }}
+      # A restored cache can still hold a module that has since been renamed or
+      # deleted -- rebar3 copies test sources into _build and never removes the
+      # orphans, and CT then tries to compile a suite that no longer exists.
+      # Deps stay cached; recompiling sh0tcaller itself takes seconds.
+      - name: Drop this app's previous build output
+        run: rm -rf _build/*/lib/sh0tcaller
+
+      - name: Compile
+        run: rebar3 as test compile
+
+  xref:
+    needs: [compile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch workspace from cache
+        uses: actions/cache@v4
+        id: cached-workspace
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: workspace-${{ github.run_id }}
+      - name: Run xref
+        run: rebar3 xref
+
+  ct:
+    needs: [compile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch workspace from cache
+        uses: actions/cache@v4
+        id: cached-workspace
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: workspace-${{ github.run_id }}
+      - name: Run CT tests
+        run: rebar3 ct
+
+  eunit:
+    needs: [compile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch workspace from cache
+        uses: actions/cache@v4
+        id: cached-workspace
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: workspace-${{ github.run_id }}
+      - name: Run EUnit tests
+        run: rebar3 eunit
+
+  dialyzer:
+    needs: [compile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "${{ env.OTP_VERSION }}"
+          rebar3-version: "${{ env.REBAR3_VERSION }}"
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - name: Fetch workspace from cache
+        uses: actions/cache@v4
+        id: cached-workspace
+        with:
+          path: |
+            _build/*/*/*
+            ebin
+          key: workspace-dialyzer-${{ github.run_id }}
+          restore-keys:
+            workspace-${{ github.run_id }}
+      - name: Run Dialyzer
+        run: rebar3 dialyzer
