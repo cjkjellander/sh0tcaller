@@ -18,7 +18,8 @@ reports from the filename.
          monitor_cycles/1,
          monitor_cycles/2,
          cycle_filename/1,
-         wav_dir/0
+         wav_dir/0,
+         parse_jt9_output/1
         ]).
 
 -define(CYCLE_MS, 15000).
@@ -116,7 +117,7 @@ decode(Path) ->
             "-t", temp_dir(),
             unicode:characters_to_list(Path)],
     case sh0tcaller_cmd:run(jt9(), Args) of
-        {ok, 0, Output} -> {ok, parse(Output)};
+        {ok, 0, Output} -> {ok, parse_jt9_output(Output)};
         {ok, Status, Output} -> {error, {jt9_failed, Status, Output}};
         {error, _} = Error -> Error
     end.
@@ -180,10 +181,15 @@ await({Ref, Path}) ->
 %% jt9 output
 %%====================================================================
 
-%% Decode lines look like:
-%%   215400   3  0.1 1669 ~  CQ UA4POO LO65
-%% and the run ends with a <DecodeFinished> summary line.
-parse(Output) ->
+-doc """
+Parse jt9's stdout into decodes. Exported so the parser can be tested
+against captured output without a radio or a wav file.
+
+Decode lines look like `215400   3  0.1 1669 ~  CQ UA4POO LO65`, and the
+run ends with a `<DecodeFinished>` summary line.
+""".
+-spec parse_jt9_output(string()) -> [decode()].
+parse_jt9_output(Output) ->
     [Decode || Line <- string:split(Output, "\n", all),
                {ok, Decode} <- [parse_line(string:trim(Line))]].
 
